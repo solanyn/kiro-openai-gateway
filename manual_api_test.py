@@ -37,6 +37,12 @@ REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
 PROFILE_ARN = os.getenv("PROFILE_ARN", "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK")
 KIRO_CREDS_FILE = os.getenv("KIRO_CREDS_FILE", "")
 
+# Enterprise SSO auth detection
+IS_ENTERPRISE_AUTH = False
+SSO_CLIENT_ID = None
+SSO_CLIENT_SECRET = None
+SSO_REGION = None
+
 # --- Load credentials from file if REFRESH_TOKEN not in env ---
 if not REFRESH_TOKEN and KIRO_CREDS_FILE:
     try:
@@ -47,6 +53,21 @@ if not REFRESH_TOKEN and KIRO_CREDS_FILE:
             REFRESH_TOKEN = creds_data.get("refreshToken", "")
             if creds_data.get("profileArn"):
                 PROFILE_ARN = creds_data["profileArn"]
+            
+            # Detect enterprise SSO auth
+            if creds_data.get("provider") == "Enterprise" or creds_data.get("authMethod") == "IdC":
+                IS_ENTERPRISE_AUTH = True
+                SSO_REGION = creds_data.get("region", "us-east-1")
+                client_id_hash = creds_data.get("clientIdHash")
+                if client_id_hash:
+                    client_path = creds_path.parent / f"{client_id_hash}.json"
+                    if client_path.exists():
+                        with open(client_path, 'r', encoding='utf-8') as f:
+                            client_data = json.load(f)
+                        SSO_CLIENT_ID = client_data.get("clientId")
+                        SSO_CLIENT_SECRET = client_data.get("clientSecret")
+                logger.info("Detected enterprise SSO auth")
+            
             logger.info(f"Credentials loaded from {KIRO_CREDS_FILE}")
         else:
             logger.warning(f"Credentials file not found: {KIRO_CREDS_FILE}")
@@ -70,9 +91,52 @@ HEADERS = {
 }
 
 
+def refresh_via_sso_oidc():
+    """Refreshes token via AWS SSO OIDC for enterprise auth."""
+    global AUTH_TOKEN, HEADERS, REFRESH_TOKEN
+    logger.info("Refreshing token via AWS SSO OIDC...")
+    
+    sso_url = f"https://oidc.{SSO_REGION}.amazonaws.com/token"
+    payload = {
+        "grantType": "refresh_token",
+        "clientId": SSO_CLIENT_ID,
+        "clientSecret": SSO_CLIENT_SECRET,
+        "refreshToken": REFRESH_TOKEN,
+    }
+    
+    try:
+        response = requests.post(sso_url, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        
+        new_token = data.get("accessToken")
+        new_refresh = data.get("refreshToken")
+        expires_in = data.get("expiresIn")
+        
+        if not new_token:
+            logger.error("Failed to get accessToken from SSO OIDC response")
+            return False
+        
+        AUTH_TOKEN = new_token
+        if new_refresh:
+            REFRESH_TOKEN = new_refresh
+        HEADERS['Authorization'] = f"Bearer {AUTH_TOKEN}"
+        
+        logger.success(f"Token refreshed via SSO OIDC. Expires in: {expires_in}s")
+        return True
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error refreshing via SSO OIDC: {e}")
+        return False
+
+
 def refresh_auth_token():
-    """Refreshes AUTH_TOKEN via Kiro API."""
-    global AUTH_TOKEN, HEADERS
+    """Refreshes AUTH_TOKEN via Kiro API or AWS SSO OIDC for enterprise auth."""
+    global AUTH_TOKEN, HEADERS, REFRESH_TOKEN
+    
+    if IS_ENTERPRISE_AUTH and SSO_CLIENT_ID and SSO_CLIENT_SECRET:
+        return refresh_via_sso_oidc()
+    
     logger.info("Refreshing Kiro token...")
     
     payload = {"refreshToken": REFRESH_TOKEN}

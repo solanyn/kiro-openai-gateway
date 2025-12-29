@@ -74,7 +74,8 @@ class KiroAuthManager:
         refresh_token: Optional[str] = None,
         profile_arn: Optional[str] = None,
         region: str = "us-east-1",
-        creds_file: Optional[str] = None
+        creds_file: Optional[str] = None,
+        access_token: Optional[str] = None
     ):
         """
         Initializes the authentication manager.
@@ -84,14 +85,16 @@ class KiroAuthManager:
             profile_arn: AWS CodeWhisperer profile ARN
             region: AWS region (default: us-east-1)
             creds_file: Path to JSON file with credentials (optional)
+            access_token: Access token to use directly (optional, skips refresh)
         """
         self._refresh_token = refresh_token
         self._profile_arn = profile_arn
         self._region = region
         self._creds_file = creds_file
         
-        self._access_token: Optional[str] = None
+        self._access_token: Optional[str] = access_token
         self._expires_at: Optional[datetime] = None
+        self._is_enterprise_auth = False  # Set to True when loading enterprise SSO credentials
         self._lock = asyncio.Lock()
         
         # Dynamic URLs based on region
@@ -142,6 +145,11 @@ class KiroAuthManager:
                 self._refresh_url = get_kiro_refresh_url(self._region)
                 self._api_host = get_kiro_api_host(self._region)
                 self._q_host = get_kiro_q_host(self._region)
+            
+            # Detect enterprise SSO auth
+            if data.get('provider') == 'Enterprise' or data.get('authMethod') == 'IdC':
+                self._is_enterprise_auth = True
+                logger.info("Detected enterprise SSO auth")
             
             # Parse expiresAt
             if 'expiresAt' in data:
@@ -211,6 +219,83 @@ class KiroAuthManager:
         
         return self._expires_at.timestamp() <= threshold
     
+    async def _refresh_via_sso_oidc(self) -> None:
+        """
+        Refreshes token via AWS SSO OIDC for enterprise auth.
+        
+        Reads client credentials from ~/.aws/sso/cache/{clientIdHash}.json
+        and calls the SSO OIDC token endpoint.
+        """
+        if not self._creds_file:
+            raise ValueError("Credentials file not set")
+        
+        # Re-read the token file to get current refresh token and clientIdHash
+        token_path = Path(self._creds_file).expanduser()
+        with open(token_path, 'r', encoding='utf-8') as f:
+            token_data = json.load(f)
+        
+        client_id_hash = token_data.get('clientIdHash')
+        refresh_token = token_data.get('refreshToken')
+        region = token_data.get('region', 'us-east-1')
+        
+        if not client_id_hash or not refresh_token:
+            raise ValueError("Missing clientIdHash or refreshToken in token file")
+        
+        # Load client credentials
+        client_path = token_path.parent / f"{client_id_hash}.json"
+        with open(client_path, 'r', encoding='utf-8') as f:
+            client_data = json.load(f)
+        
+        client_id = client_data.get('clientId')
+        client_secret = client_data.get('clientSecret')
+        
+        if not client_id or not client_secret:
+            raise ValueError("Missing clientId or clientSecret in client file")
+        
+        logger.info("Refreshing token via AWS SSO OIDC...")
+        
+        # Call SSO OIDC token endpoint
+        sso_url = f"https://oidc.{region}.amazonaws.com/token"
+        payload = {
+            'grantType': 'refresh_token',
+            'clientId': client_id,
+            'clientSecret': client_secret,
+            'refreshToken': refresh_token,
+        }
+        
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(sso_url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+        
+        new_access_token = data.get('accessToken')
+        new_refresh_token = data.get('refreshToken')
+        expires_in = data.get('expiresIn', 3600)
+        
+        if not new_access_token:
+            raise ValueError(f"SSO OIDC response missing accessToken: {data}")
+        
+        # Update internal state
+        self._access_token = new_access_token
+        if new_refresh_token:
+            self._refresh_token = new_refresh_token
+        
+        self._expires_at = datetime.fromtimestamp(
+            datetime.now(timezone.utc).timestamp() + expires_in - 60,
+            tz=timezone.utc
+        )
+        
+        logger.info(f"Token refreshed via SSO OIDC, expires: {self._expires_at.isoformat()}")
+        
+        # Update the token file
+        token_data['accessToken'] = new_access_token
+        if new_refresh_token:
+            token_data['refreshToken'] = new_refresh_token
+        token_data['expiresAt'] = self._expires_at.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        
+        with open(token_path, 'w', encoding='utf-8') as f:
+            json.dump(token_data, f, indent=4)
+
     async def _refresh_token_request(self) -> None:
         """
         Performs a token refresh request.
@@ -271,6 +356,7 @@ class KiroAuthManager:
         
         Thread-safe method using asyncio.Lock.
         Automatically refreshes the token if it has expired or is about to expire.
+        Uses SSO OIDC refresh for enterprise auth, otherwise uses Kiro refresh.
         
         Returns:
             Valid access token
@@ -280,7 +366,11 @@ class KiroAuthManager:
         """
         async with self._lock:
             if not self._access_token or self.is_token_expiring_soon():
-                await self._refresh_token_request()
+                # Check if this is enterprise SSO auth
+                if self._is_enterprise_auth:
+                    await self._refresh_via_sso_oidc()
+                else:
+                    await self._refresh_token_request()
             
             if not self._access_token:
                 raise ValueError("Failed to obtain access token")

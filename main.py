@@ -124,7 +124,6 @@ def validate_configuration() -> None:
     Validates that required configuration is present.
     
     Checks:
-    - .env file exists
     - Either REFRESH_TOKEN or KIRO_CREDS_FILE is configured
     
     Raises:
@@ -132,55 +131,31 @@ def validate_configuration() -> None:
     """
     errors = []
     
-    # Check if .env file exists
-    env_file = Path(".env")
-    env_example = Path(".env.example")
+    # Check for credentials (from env vars or .env file)
+    has_refresh_token = bool(REFRESH_TOKEN)
+    has_creds_file = bool(KIRO_CREDS_FILE)
     
-    if not env_file.exists():
+    # Check if creds file actually exists
+    if KIRO_CREDS_FILE:
+        creds_path = Path(KIRO_CREDS_FILE).expanduser()
+        if not creds_path.exists():
+            has_creds_file = False
+            logger.warning(f"KIRO_CREDS_FILE not found: {KIRO_CREDS_FILE}")
+    
+    if not has_refresh_token and not has_creds_file:
         errors.append(
-            ".env file not found!\n"
+            "No Kiro credentials configured!\n"
             "\n"
-            "To get started:\n"
-            "1. Create .env or rename from .env.example:\n"
-            "   cp .env.example .env\n"
+            "   Configure via environment variables:\n"
             "\n"
-            "2. Edit .env and configure your credentials:\n"
-            "   2.1. Set you super-secret password as PROXY_API_KEY\n"
-            "   2.2. Set your Kiro credentials:\n"
-            "      - 1 way: KIRO_CREDS_FILE to your Kiro credentials JSON file\n"
-            "      - 2 way: REFRESH_TOKEN from Kiro IDE traffic\n"
+            "   PROXY_API_KEY - API key for proxy authentication\n"
             "\n"
-            "See README.md for detailed instructions."
+            "   Option 1: JSON credentials file (for enterprise SSO)\n"
+            "      KIRO_CREDS_FILE=\"~/.aws/sso/cache/kiro-auth-token.json\"\n"
+            "\n"
+            "   Option 2: Refresh token\n"
+            "      REFRESH_TOKEN=\"your_refresh_token_here\""
         )
-    else:
-        # .env exists, check for credentials
-        has_refresh_token = bool(REFRESH_TOKEN)
-        has_creds_file = bool(KIRO_CREDS_FILE)
-        
-        # Check if creds file actually exists
-        if KIRO_CREDS_FILE:
-            creds_path = Path(KIRO_CREDS_FILE).expanduser()
-            if not creds_path.exists():
-                has_creds_file = False
-                logger.warning(f"KIRO_CREDS_FILE not found: {KIRO_CREDS_FILE}")
-        
-        if not has_refresh_token and not has_creds_file:
-            errors.append(
-                "No Kiro credentials configured!\n"
-                "\n"
-                "   Configure one of the following in your .env file:\n"
-                "\n"
-                "Set you super-secret password as PROXY_API_KEY\n"
-                "   PROXY_API_KEY=\"my-super-secret-password-123\"\n"
-                "\n"
-                "   Option 1 (Recommended): JSON credentials file\n"
-                "      KIRO_CREDS_FILE=\"path/to/your/kiro-credentials.json\"\n"
-                "\n"
-                "   Option 2: Refresh token\n"
-                "      REFRESH_TOKEN=\"your_refresh_token_here\"\n"
-                "\n"
-                "   See README.md for how to obtain credentials."
-            )
     
     # Print errors and exit if any
     if errors:

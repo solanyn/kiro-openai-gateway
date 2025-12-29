@@ -90,6 +90,9 @@ PROXY_API_KEY: str = os.getenv("PROXY_API_KEY", "changeme_proxy_secret")
 # Refresh token for updating access token
 REFRESH_TOKEN: str = os.getenv("REFRESH_TOKEN", "")
 
+# Access token (optional, if provided will be used directly without refresh)
+ACCESS_TOKEN: str = os.getenv("ACCESS_TOKEN", "")
+
 # Profile ARN for AWS CodeWhisperer
 PROFILE_ARN: str = os.getenv("PROFILE_ARN", "")
 
@@ -343,12 +346,14 @@ def get_kiro_refresh_url(region: str) -> str:
 
 def get_kiro_api_host(region: str) -> str:
     """Return API host for the specified region."""
-    return KIRO_API_HOST_TEMPLATE.format(region=region)
+    # CodeWhisperer API is only available in us-east-1
+    return KIRO_API_HOST_TEMPLATE.format(region="us-east-1")
 
 
 def get_kiro_q_host(region: str) -> str:
     """Return Q API host for the specified region."""
-    return KIRO_Q_HOST_TEMPLATE.format(region=region)
+    # Q API is only available in us-east-1
+    return KIRO_Q_HOST_TEMPLATE.format(region="us-east-1")
 
 
 def get_internal_model_id(external_model: str) -> str:
